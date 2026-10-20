@@ -6,13 +6,21 @@
 
 所有外部相依（sender、AI）都從建構子注入，測試不打真實 API。
 """
+import hmac
 import json
 import time
+from datetime import datetime, timedelta
 
 from faq import DEFAULT_OPTIONS
 from line_api import decision_card, text_messages
 
 CLAIM_WORD = "我是老闆"
+CLAIM_WINDOW = 15 * 60       # 認證碼錯誤次數的計算區間
+CLAIM_GLOBAL_MAX = 30        # 全店 1 小時內認證碼錯誤超過這個數，暫停所有人綁定（分散式猜碼）
+ESCALATE_BURST = 3           # 同一位客人 1 小時內超過幾張決策卡，之後只記錄不推（省 push 額度、不洗版老闆）
+AI_BREAKER_SEC = 60          # Claude 出錯後暫停呼叫幾秒（401/429/逾時時不要每則訊息都等一輪）
+PUSH_FAIL_TEXT = ("⚠️ 沒送出去（可能是本月 LINE 推播額度用完，或對方已封鎖）。這件事仍在待辦，"
+                  "請直接到 LINE 官方帳號管理後台回覆對方。")
 OWNER_HELP = ("你可以用的指令：\n"
               "・待辦 — 把還沒決定的事再推一次\n"
               "・重載 — faq.json 改過後重新載入\n"
@@ -27,6 +35,12 @@ class Bot:
         self.sender = sender
         self.ai = ai
         self.clock = clock
+        self._ai_down_until = 0.0
+
+    @staticmethod
+    def _ok(res):
+        """sender 回 (status, body)；舊式假 sender 回 None 視為成功。"""
+        return res is None or not isinstance(res, tuple) or 200 <= res[0] < 300
 
     # ── 送訊息 ────────────────────────────────────────────
     def _send(self, event, user_id, messages):
@@ -35,8 +49,10 @@ class Bot:
         ts = event.get("timestamp")  # LINE 給的是毫秒
         age = self.clock() - (ts / 1000.0) if ts else 0
         if token and age < self.cfg.reply_ttl_sec:
-            self.sender.reply(token, messages)
-            return "reply"
+            res = self.sender.reply(token, messages)
+            if self._ok(res) or not (isinstance(res, tuple) and res[0] == 400):
+                return "reply"
+            # 400＝reply token 失效（過期或已用過），這則其實沒送出去，改用 push 補
         self.sender.push(user_id, messages)
         return "push"
 
@@ -58,10 +74,17 @@ class Bot:
         """「我是老闆 1234」：認證碼對才綁定。避免任何人打四個字就變老闆。"""
         rest = text.strip()[len(CLAIM_WORD):].strip()
         code = self.cfg.owner_claim_code
-        if code and rest == code:
+        now = int(self.clock())
+        if (self.store.claim_fail_count(now - CLAIM_WINDOW, user_id) >= self.cfg.claim_max_fails
+                or self.store.claim_fail_count(now - 3600) >= CLAIM_GLOBAL_MAX):
+            print(f"[安全] 老闆認證碼嘗試過多，已暫時拒絕綁定（user …{user_id[-4:]}）", flush=True)
+            self._send(event, user_id, text_messages("嘗試次數太多，請 15 分鐘後再試。"))
+            return True
+        if code and hmac.compare_digest(rest.encode("utf-8"), code.encode("utf-8")):
             self.store.set_role(user_id, "owner")
             self._send(event, user_id, text_messages("認證完成 ✅ 客人問我答不出來的事，我會推卡片給你。\n\n" + OWNER_HELP))
             return True
+        self.store.add_claim_fail(user_id, now)
         self._send(event, user_id, text_messages("認證碼不對。請輸入「我是老闆 <認證碼>」，認證碼在 .env 的 BOT_OWNER_CLAIM_CODE。"))
         return True
 
@@ -72,12 +95,17 @@ class Bot:
             if not rows:
                 self._send(event, user_id, text_messages("沒有待決定的事 👍"))
                 return "owner_todo"
-            for r in rows[:5]:
-                self.sender.push(user_id, [decision_card(r["id"], f"{self.faq.shop_name}・需要你決定",
-                                                         r["question"], r["context"], json.loads(r["options"]))])
+            # 用 reply 送（免費、不吃每月 push 額度；額度用完時老闆還是看得到待辦）
+            cards = [decision_card(r["id"], f"{self.faq.shop_name}・需要你決定",
+                                   r["question"], r["context"], json.loads(r["options"])) for r in rows[:5]]
+            self._send(event, user_id, cards)
             return "owner_todo"
         if t in ("重載", "重新載入", "reload"):
-            self.faq.reload()
+            try:
+                self.faq.reload()
+            except Exception as e:  # faq.json 改壞了：舊話術照常，告訴老闆哪裡錯
+                self._send(event, user_id, text_messages(f"重新載入失敗，仍使用舊的話術 ⚠️\n{str(e)[:200]}"))
+                return "owner_reload_failed"
             self._send(event, user_id, text_messages("客服話術已重新載入 ✅"))
             return "owner_reload"
         if t in ("說明", "help", "指令"):
@@ -85,8 +113,10 @@ class Bot:
             return "owner_help"
         target = self.store.text_target()
         if target:
+            if not self._ok(self.sender.push(target["from_user_id"], text_messages(t))):
+                self._send(event, user_id, text_messages(PUSH_FAIL_TEXT))
+                return "owner_forward_failed"
             self.store.set_decision(target["id"], "resolved", free_text=t)
-            self.sender.push(target["from_user_id"], text_messages(t))
             self.store.log(target["from_user_id"], "out", t, "owner_text", 1.0)
             self._send(event, user_id, text_messages(f"已照你的話回覆對方 ✅\n（{target['question'][:40]}）"))
             return "owner_forward"
@@ -106,8 +136,15 @@ class Bot:
         owners = self.owners()
         if not owners:
             print("[提醒] 目前還沒有綁定老闆，這張決策卡沒有人收到。請用老闆的 LINE 傳「我是老闆 <認證碼>」，綁定後打「待辦」就會補推。", flush=True)
-        for owner in owners:
-            self.sender.push(owner, [card])
+        # 同一位客人短時間狂傳：決策照記（打「待辦」看得到），但不再一直推卡片
+        since = (datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds")  # 與 db 的 created_at 同一個時鐘
+        if self.store.decisions_since(user_id, since) > ESCALATE_BURST:
+            print(f"[節流] 客人 …{user_id[-4:]} 1 小時內決策卡過多，這張只記錄不推播。", flush=True)
+            return did
+        results = [self.sender.push(owner, [card]) for owner in owners]
+        if owners and not any(self._ok(r) for r in results):
+            print("[警告] 決策卡推播給老闆全部失敗（可能 token 失效或本月 push 額度用完）。"
+                  "老闆傳「待辦」可用免費的 reply 補看。", flush=True)
         return did
 
     # ── 客人 ──────────────────────────────────────────────
@@ -125,11 +162,17 @@ class Bot:
             self._say(event, user_id, answer, intent, conf)
             return "faq"
 
-        if self.ai is not None:
+        reply = None
+        if self.ai is not None and self._ai_allowed(user_id):
+            self.store.add_ai_call(user_id, self.clock())
             try:
                 reply, _info = self.ai.answer(text, self.faq.shop_name, self.faq.knowledge_text())
-            except Exception as e:  # AI 掛掉就當作答不出來
-                reply, _info = None, {"error": str(e)}
+            except Exception as e:  # AI 掛掉（401/429/逾時/格式變了）就當作答不出來，推給老闆
+                self._ai_down_until = self.clock() + AI_BREAKER_SEC
+                status = getattr(e, "status_code", "")
+                print(f"[AI 失敗] {type(e).__name__} {status}，{AI_BREAKER_SEC} 秒內改直接交給老闆。"
+                      f"401＝金鑰錯／已撤銷；429＝限流或額度不足；其他請看 Claude Console。", flush=True)
+                reply = None
             if reply:
                 self._say(event, user_id, reply, "ai", None)
                 return "ai"
@@ -138,11 +181,22 @@ class Bot:
         self._escalate(user_id, text, display_name)
         return "escalated"
 
+    def _ai_allowed(self, user_id) -> bool:
+        now = self.clock()
+        if now < self._ai_down_until:
+            return False
+        if self.store.ai_count(int(now) - 3600, user_id) >= self.cfg.ai_per_user_hour:
+            return False
+        return self.store.ai_count(int(now) - 86400) < self.cfg.ai_daily_cap
+
     def _handle_postback(self, event, user_id):
         data = event.get("postback", {}).get("data", "")
         if not data.startswith("decide:") or not self.is_owner(user_id):
             return "ignored"
-        _, sid, value = data.split(":", 2)
+        parts = data.split(":", 2)
+        if len(parts) != 3 or not parts[1].isdigit():
+            return "ignored"
+        _, sid, value = parts
         d = self.store.get_decision(int(sid))
         if not d:
             return "ignored"
@@ -152,8 +206,10 @@ class Bot:
         options = json.loads(d["options"])
         chosen = next((o for o in options if o["value"] == value), None)
         if chosen and chosen.get("reply"):
+            if not self._ok(self.sender.push(d["from_user_id"], text_messages(chosen["reply"]))):
+                self._send(event, user_id, text_messages(PUSH_FAIL_TEXT))
+                return "decide_failed"
             self.store.set_decision(d["id"], "resolved", chosen=value)
-            self.sender.push(d["from_user_id"], text_messages(chosen["reply"]))
             self.store.log(d["from_user_id"], "out", chosen["reply"], "owner_decision", 1.0)
             self._send(event, user_id, text_messages(f"已回覆對方：\n「{chosen['reply']}」"))
             return "decided"
@@ -167,6 +223,9 @@ class Bot:
         if not user_id:
             return "ignored"
         etype = event.get("type")
+        eid = event.get("webhookEventId")
+        if eid and not self.store.claim_event(eid):  # LINE 重送（isRedelivery）：已處理過就直接略過
+            return "duplicate"
         if etype == "follow":
             self.store.touch_contact(user_id, self.sender.display_name(user_id))
             self._send(event, user_id, text_messages(self.faq.welcome))
@@ -181,7 +240,8 @@ class Bot:
             return "ignored"
 
         text = msg.get("text", "")
-        name = self.sender.display_name(user_id)
+        known = self.store.get_contact(user_id)
+        name = (known["display_name"] if known and known["display_name"] else None) or self.sender.display_name(user_id)
         self.store.touch_contact(user_id, name)
         if text.strip().startswith(CLAIM_WORD):
             self._try_claim(event, user_id, text)

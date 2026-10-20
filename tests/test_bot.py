@@ -27,12 +27,15 @@ NOW = 1_800_000_000.0
 class FakeSender:
     def __init__(self):
         self.sent = []
+        self.push_status = 200   # 測試可改成 429 模擬額度用完
 
     def reply(self, token, messages):
         self.sent.append(("reply", token, messages))
+        return 200, ""
 
     def push(self, to, messages):
         self.sent.append(("push", to, messages))
+        return self.push_status, ""
 
     def display_name(self, user_id):
         return "測試客人" if user_id == CUSTOMER else "老闆"
@@ -43,7 +46,7 @@ class FakeSender:
                 for m in ms if m["type"] == "text"]
 
     def cards_to(self, who):
-        return [m for kind, to, ms in self.sent if kind == "push" and to == who for m in ms if m["type"] == "flex"]
+        return [m for kind, to, ms in self.sent if to in (who, "tok-" + who) for m in ms if m["type"] == "flex"]
 
 
 class FakeAI:

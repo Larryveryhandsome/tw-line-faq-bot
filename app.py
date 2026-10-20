@@ -33,7 +33,8 @@ def build_bot(cfg):
 
 def create_app(cfg, bot):
     app = Flask(__name__)
-    jobs: "queue.Queue[dict]" = queue.Queue()
+    app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024  # webhook 本文不會大於 1MB
+    jobs: "queue.Queue[dict]" = queue.Queue(maxsize=2000)
 
     def worker():
         while True:
@@ -53,8 +54,15 @@ def create_app(cfg, bot):
         body = request.get_data()
         if not verify_signature(cfg.channel_secret, body, request.headers.get("X-Line-Signature", "")):
             abort(400)
-        for ev in json.loads(body.decode("utf-8") or "{}").get("events", []):
-            jobs.put(ev)
+        try:
+            events = json.loads(body.decode("utf-8") or "{}").get("events", [])
+        except ValueError:
+            abort(400)
+        for ev in events:
+            try:
+                jobs.put_nowait(ev)
+            except queue.Full:  # 佇列滿了回 503，不要默默吞掉
+                abort(503)
         return "OK"
 
     @app.get("/health")

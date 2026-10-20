@@ -18,13 +18,13 @@ class ClaudeResponder:
     def __init__(self, api_key: str, model: str, client=None):
         if client is None:
             from anthropic import Anthropic  # 只有真的要用才 import
-            client = Anthropic(api_key=api_key)
+            client = Anthropic(api_key=api_key, timeout=20.0, max_retries=1)  # 逾時要短，不然單一執行緒會卡住所有客人
         self.client = client
         self.model = model
 
     def answer(self, question: str, shop_name: str, knowledge: str):
         """回傳 (回覆文字 或 None, 用量資訊 dict)。None 代表要交給老闆。"""
-        resp = self.client.messages.create(
+        kwargs = dict(
             model=self.model,
             max_tokens=1024,
             system=[
@@ -32,8 +32,11 @@ class ClaudeResponder:
                 {"type": "text", "text": knowledge, "cache_control": {"type": "ephemeral"}},
             ],
             messages=[{"role": "user", "content": question}],
-            output_config={"effort": "low"},
         )
+        try:
+            resp = self.client.messages.create(output_config={"effort": "low"}, **kwargs)
+        except TypeError:  # 舊版 anthropic SDK 沒有 output_config 參數：不帶它再試一次
+            resp = self.client.messages.create(**kwargs)
         usage = getattr(resp, "usage", None)
         info = {
             "model": self.model,

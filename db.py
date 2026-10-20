@@ -1,6 +1,7 @@
 """SQLite：聯絡人、訊息紀錄、待老闆決定的事。"""
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +37,14 @@ CREATE TABLE IF NOT EXISTS decisions (
     resolved_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status, id);
+CREATE INDEX IF NOT EXISTS idx_decisions_user ON decisions(from_user_id, id);
+-- LINE 重送同一事件（webhookEventId）只處理一次：避免重複回覆、重複推卡、重複扣 Claude 費用
+CREATE TABLE IF NOT EXISTS processed_events (event_id TEXT PRIMARY KEY, ts INTEGER NOT NULL);
+-- 老闆認證碼嘗試紀錄：防暴力猜測
+CREATE TABLE IF NOT EXISTS claim_fails (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, ts INTEGER NOT NULL);
+-- Claude 呼叫紀錄：每人／全店額度控管，避免被洗版燒錢
+CREATE TABLE IF NOT EXISTS ai_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, ts INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_ai_calls_ts ON ai_calls(ts);
 """
 
 
@@ -52,13 +61,58 @@ class Store:
 
     @contextmanager
     def conn(self):
-        c = sqlite3.connect(self.path)
+        c = sqlite3.connect(self.path, timeout=30)
         c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout = 30000")
+        c.execute("PRAGMA journal_mode = WAL")  # 讀寫不互卡，多人同時傳訊也穩
         try:
             yield c
             c.commit()
         finally:
             c.close()
+
+    # 冪等：同一個 webhookEventId 只回 True 一次
+    def claim_event(self, event_id) -> bool:
+        now = int(time.time())
+        with self.conn() as c:
+            n = c.execute("INSERT OR IGNORE INTO processed_events (event_id, ts) VALUES (?,?)",
+                          (event_id, now)).rowcount
+            if n and now % 50 == 0:  # 偶爾清掉 7 天前的，表不會無限長大
+                c.execute("DELETE FROM processed_events WHERE ts < ?", (now - 7 * 86400,))
+            return bool(n)
+
+    # 老闆認證碼嘗試
+    def claim_fail_count(self, since, user_id=None) -> int:
+        q, a = "SELECT COUNT(*) n FROM claim_fails WHERE ts >= ?", [since]
+        if user_id:
+            q, a = q + " AND user_id=?", a + [user_id]
+        with self.conn() as c:
+            return c.execute(q, a).fetchone()["n"]
+
+    def add_claim_fail(self, user_id, now=None):
+        with self.conn() as c:
+            c.execute("INSERT INTO claim_fails (user_id, ts) VALUES (?,?)", (user_id, int(now or time.time())))
+
+    # Claude 用量
+    def ai_count(self, since, user_id=None) -> int:
+        q, a = "SELECT COUNT(*) n FROM ai_calls WHERE ts >= ?", [since]
+        if user_id:
+            q, a = q + " AND user_id=?", a + [user_id]
+        with self.conn() as c:
+            return c.execute(q, a).fetchone()["n"]
+
+    def add_ai_call(self, user_id, now=None):
+        with self.conn() as c:
+            c.execute("INSERT INTO ai_calls (user_id, ts) VALUES (?,?)", (user_id, int(now or time.time())))
+
+    def decisions_since(self, user_id, since_iso) -> int:
+        with self.conn() as c:
+            return c.execute("SELECT COUNT(*) n FROM decisions WHERE from_user_id=? AND created_at >= ?",
+                             (user_id, since_iso)).fetchone()["n"]
+
+    def get_contact(self, user_id):
+        with self.conn() as c:
+            return c.execute("SELECT * FROM contacts WHERE user_id=?", (user_id,)).fetchone()
 
     # contacts
     def touch_contact(self, user_id, display_name=None):

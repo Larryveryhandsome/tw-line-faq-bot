@@ -24,7 +24,19 @@ class FAQ:
         self.reload()
 
     def reload(self):
-        self.data = json.loads(self.path.read_text(encoding="utf-8"))
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        # 先驗證再換上去：faq.json 改壞了，舊的話術照常運作，不會讓每位客人都出錯
+        if not isinstance(data, dict):
+            raise ValueError("faq.json 最外層要是 { }")
+        for i, e in enumerate(data.get("entries", []), 1):
+            if not (isinstance(e, dict) and e.get("intent") and e.get("answer")
+                    and isinstance(e.get("keywords"), list) and any(str(k).strip() for k in e["keywords"])):
+                raise ValueError(f"faq.json 第 {i} 筆 entries 需要 intent、answer、keywords（至少一個關鍵字）")
+        for j, t in enumerate(data.get("escalation_templates", []), 1):
+            if not (isinstance(t, dict) and isinstance(t.get("trigger"), list) and isinstance(t.get("options"), list)
+                    and t["options"] and t.get("question_prefix")):
+                raise ValueError(f"faq.json 第 {j} 筆 escalation_templates 需要 trigger、question_prefix、options")
+        self.data = data
         return self
 
     @property
@@ -65,13 +77,13 @@ class FAQ:
     def sensitive_hits(self, text: str):
         """命中敏感詞（客訴、退款、法律…）就一定轉真人，不讓機器人回。"""
         norm = normalise(text)
-        return [k for k in self.data.get("handoff_keywords", []) if normalise(k) in norm]
+        return [k for k in self.data.get("handoff_keywords", []) if normalise(k) and normalise(k) in norm]
 
     def escalation_template(self, text: str):
         """已知「要老闆拍板」的情境（談價、月結…）回傳預設按鈕。"""
         norm = normalise(text)
         for tpl in self.data.get("escalation_templates", []):
-            if any(normalise(t) in norm for t in tpl["trigger"]):
+            if any(normalise(t) and normalise(t) in norm for t in tpl["trigger"]):
                 return tpl
         return None
 

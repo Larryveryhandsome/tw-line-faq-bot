@@ -3,6 +3,8 @@ import base64
 import hashlib
 import hmac
 import json
+import time
+import uuid
 import urllib.error
 import urllib.request
 
@@ -29,10 +31,21 @@ class LineSender:
         self.token = access_token
         self.timeout = timeout
 
-    def _call(self, method, path, body=None):
+    def _call(self, method, path, body=None, retries=0):
+        """retries>0 只給 push 用：逾時／5xx 會重試，並帶同一個 X-Line-Retry-Key，LINE 端保證不會重複送。"""
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(API + path, data=data, method=method, headers={
-            "Authorization": f"Bearer {self.token}", "Content-Type": "application/json"})
+        headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+        if retries:
+            headers["X-Line-Retry-Key"] = str(uuid.uuid4())
+        for attempt in range(retries + 1):
+            status, text = self._once(method, path, data, headers)
+            if status in (0, 500, 502, 503, 504) and attempt < retries:
+                time.sleep(1 + attempt)
+                continue
+            return status, text
+
+    def _once(self, method, path, data, headers):
+        req = urllib.request.Request(API + path, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 return r.status, r.read().decode("utf-8")
@@ -54,13 +67,16 @@ class LineSender:
             hint = "（超過 LINE 訊息則數或頻率上限）"
         elif status == 0:
             hint = "（連不到 LINE API，請檢查網路）"
-        print(f"[LINE API 失敗] {method} {path.split('?')[0]} -> {status} {detail[:200]}{hint}", flush=True)
+        path = path.split("?")[0]
+        if path.startswith("/profile/"):
+            path = "/profile/<userId>"  # log 不留客人的 userId
+        print(f"[LINE API 失敗] {method} {path} -> {status} {detail[:200]}{hint}", flush=True)
 
     def reply(self, reply_token, messages):
         return self._call("POST", "/message/reply", {"replyToken": reply_token, "messages": messages[:5]})
 
     def push(self, user_id, messages):
-        return self._call("POST", "/message/push", {"to": user_id, "messages": messages[:5]})
+        return self._call("POST", "/message/push", {"to": user_id, "messages": messages[:5]}, retries=2)
 
     def display_name(self, user_id):
         status, body = self._call("GET", f"/profile/{user_id}")

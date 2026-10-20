@@ -39,6 +39,9 @@ class Config:
     data_dir: Path = field(default_factory=lambda: BASE_DIR / "data")
     faq_path: Path = field(default_factory=lambda: BASE_DIR / "faq.json")
     # 選用：Claude 補答（沒設 key 就完全不呼叫 AI）
+    ai_per_user_hour: int = 6        # 每位客人每小時最多讓 Claude 補答幾次（防洗版燒錢）
+    ai_daily_cap: int = 300          # 全店每 24 小時最多呼叫 Claude 幾次
+    claim_max_fails: int = 5         # 老闆認證碼同一人 15 分鐘內最多錯幾次
     anthropic_api_key: str = ""
     ai_model: str = "claude-sonnet-5-5"
 
@@ -59,6 +62,8 @@ class Config:
                 + "\n請把 .env.example 複製成 .env 並填入（步驟見 README）。")
         if not self.owner_user_id and not self.owner_claim_code:
             raise ConfigError("請在 .env 設定 BOT_OWNER_CLAIM_CODE（老闆認證碼）或 BOT_OWNER_USER_ID。")
+        if self.owner_claim_code and len(self.owner_claim_code) < 6:
+            raise ConfigError("BOT_OWNER_CLAIM_CODE 太短，至少 6 個字（建議 8 位以上英數混合），不然別人可以猜到變成老闆。")
 
 
 def from_env() -> Config:
@@ -74,6 +79,8 @@ def from_env() -> Config:
         port=int(_env("BOT_PORT", "18800")),
         threshold=float(_env("BOT_CONFIDENCE_THRESHOLD", "0.55")),
         reply_ttl_sec=int(_env("BOT_REPLY_TTL_SEC", "50")),
+        ai_per_user_hour=int(_env("BOT_AI_PER_USER_HOUR", "6")),
+        ai_daily_cap=int(_env("BOT_AI_DAILY_CAP", "300")),
         anthropic_api_key=_env("ANTHROPIC_API_KEY"),
         ai_model=_env("BOT_AI_MODEL", "claude-sonnet-5-5"),
     )
