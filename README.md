@@ -30,6 +30,18 @@
 
 ---
 
+## 需要哪些金鑰？
+
+| 項目 | 必填？ | 費用 |
+|---|---|---|
+| LINE Channel secret、Channel access token | ✅ 必填 | 免費（推播則數依官方帳號方案） |
+| 老闆認證碼（自己想一組） | ✅ 必填（或改填老闆 userId） | 免費 |
+| Anthropic（Claude）API 金鑰 | 選填，AI 補答才需要 | 依用量計費 |
+
+👉 **每一項怎麼申請、填在哪、費用和外流處理，請看 [docs/金鑰申請.md](docs/金鑰申請.md)**（每一步都寫了要點哪個選單，照著做就好）。
+
+---
+
 ## 怎麼用（約 20 分鐘，只做一次）
 
 **需要：** Python 3.10 以上（[python.org](https://www.python.org/downloads/)，Windows 安裝時勾選「Add python.exe to PATH」）、一個 LINE 官方帳號。
