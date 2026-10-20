@@ -163,6 +163,7 @@ python -m unittest discover -s tests
 | 客人傳訊息沒反應 | LINE Developers → Messaging API → **Use webhook** 沒打開；看 `data\bot.log` |
 | bot 跟自動回應一起回 | 官方帳號後台 → 回應設定 → 關掉「自動回應訊息」 |
 | 老闆收不到卡片 | 還沒傳「我是老闆 認證碼」，或認證碼打錯 |
+| `dataot.log` 出現「LINE API 失敗 … 401」 | Channel access token 填錯或已重新 Issue，回到步驟 2 重新複製、更新 `.env` 後重啟 |
 
 ## 授權
 

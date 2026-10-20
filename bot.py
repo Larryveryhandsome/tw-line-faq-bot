@@ -103,7 +103,10 @@ class Bot:
             + "\n\n點一個按鈕，我就照這個意思回他。"
         did = self.store.create_decision(user_id, f"{prefix}：{text[:80]}", context, options)
         card = decision_card(did, f"{self.faq.shop_name}・需要你決定", prefix, context, options)
-        for owner in self.owners():
+        owners = self.owners()
+        if not owners:
+            print("[提醒] 目前還沒有綁定老闆，這張決策卡沒有人收到。請用老闆的 LINE 傳「我是老闆 <認證碼>」，綁定後打「待辦」就會補推。", flush=True)
+        for owner in owners:
             self.sender.push(owner, [card])
         return did
 

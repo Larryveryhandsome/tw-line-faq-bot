@@ -215,6 +215,50 @@ class PartsTest(unittest.TestCase):
             flask_app.config["JOBS"].join()
             self.assertEqual(len(handled), 1)
 
+    def test_line_api_error_is_logged_not_raised(self):
+        """token 錯誤（401）時不丟例外，但要在 log 留下看得懂的訊息。"""
+        import contextlib
+        import io
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(b'{"message":"Authentication failed"}')
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        old = line_api.API
+        line_api.API = f"http://127.0.0.1:{srv.server_port}/v2/bot"
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                status, _ = line_api.LineSender("bad-token").push(CUSTOMER, [{"type": "text", "text": "x"}])
+        finally:
+            line_api.API = old
+            srv.shutdown()
+        self.assertEqual(status, 401)
+        self.assertIn("401", out.getvalue())
+        self.assertIn("Channel access token", out.getvalue())
+        self.assertNotIn("bad-token", out.getvalue())
+
+    def test_escalate_without_owner_warns(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            sender = FakeSender()
+            cfg = Config(channel_secret="s", owner_claim_code="1", data_dir=Path(d))
+            bot = Bot(cfg, Store(cfg.db_path), FAQ(ROOT / "faq.json"), sender, clock=lambda: NOW)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                bot.handle_event(msg(CUSTOMER, "你們有賣火鍋嗎"))
+            self.assertIn("還沒有綁定老闆", out.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

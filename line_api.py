@@ -37,9 +37,24 @@ class LineSender:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 return r.status, r.read().decode("utf-8")
         except urllib.error.HTTPError as e:
-            return e.code, e.read().decode("utf-8", "replace")
+            body = e.read().decode("utf-8", "replace")
+            self._warn(method, path, e.code, body)
+            return e.code, body
         except Exception as e:  # 網路問題不該讓主流程掛掉
+            self._warn(method, path, 0, str(e))
             return 0, str(e)
+
+    @staticmethod
+    def _warn(method, path, status, detail):
+        """LINE 回非 2xx 時寫一行清楚的紀錄（不含 token），方便對照 README 的常見問題排錯。"""
+        hint = ""
+        if status == 401:
+            hint = "（Channel access token 無效或已重發，請到 LINE Developers Console 重新 Issue，更新 .env 後重啟）"
+        elif status == 429:
+            hint = "（超過 LINE 訊息則數或頻率上限）"
+        elif status == 0:
+            hint = "（連不到 LINE API，請檢查網路）"
+        print(f"[LINE API 失敗] {method} {path.split('?')[0]} -> {status} {detail[:200]}{hint}", flush=True)
 
     def reply(self, reply_token, messages):
         return self._call("POST", "/message/reply", {"replyToken": reply_token, "messages": messages[:5]})
