@@ -1,0 +1,7 @@
+# 秘密與執行時資料：一律不進 git
+.env
+data/
+*.db
+*.log
+__pycache__/
+*.pyc
