@@ -58,6 +58,10 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.conn() as c:
             c.executescript(SCHEMA)
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(decisions)")}
+            if "claimed_by" not in cols:  # 舊資料庫升級：記錄「哪位老闆按了我來回」
+                c.execute("ALTER TABLE decisions ADD COLUMN claimed_by TEXT")
+                c.execute("ALTER TABLE decisions ADD COLUMN claimed_at INTEGER")
 
     @contextmanager
     def conn(self):
@@ -158,19 +162,26 @@ class Store:
         with self.conn() as c:
             return c.execute("SELECT * FROM decisions WHERE id=?", (did,)).fetchone()
 
-    def set_decision(self, did, status, chosen=None, free_text=None):
+    def set_decision(self, did, status, chosen=None, free_text=None, claimed_by=None, claimed_at=None):
         with self.conn() as c:
             c.execute("UPDATE decisions SET status=?, chosen=COALESCE(?, chosen), free_text=?,"
+                      " claimed_by=COALESCE(?, claimed_by), claimed_at=COALESCE(?, claimed_at),"
                       " resolved_at=CASE WHEN ?='resolved' THEN ? ELSE resolved_at END WHERE id=?",
-                      (status, chosen, free_text, status, _now(), did))
+                      (status, chosen, free_text, claimed_by, claimed_at, status, _now(), did))
 
     def open_decisions(self):
         with self.conn() as c:
             return c.execute("SELECT * FROM decisions WHERE status IN ('pending','waiting_text')"
                              " ORDER BY id").fetchall()
 
-    def text_target(self):
-        """老闆直接打字時要回給誰：先找按了「我來回」的，再找最新一筆待決。"""
+    def text_target(self, owner_id, now, ttl):
+        """這位老闆打字要回給誰：只看『他自己』按過「我來回」、且鎖定還沒過期的那一筆（最新的優先）。"""
         with self.conn() as c:
-            row = c.execute("SELECT * FROM decisions WHERE status='waiting_text' ORDER BY id DESC LIMIT 1").fetchone()
-            return row or c.execute("SELECT * FROM decisions WHERE status='pending' ORDER BY id DESC LIMIT 1").fetchone()
+            return c.execute("SELECT * FROM decisions WHERE status='waiting_text' AND claimed_by=?"
+                             " AND claimed_at >= ? ORDER BY claimed_at DESC, id DESC LIMIT 1",
+                             (owner_id, int(now) - ttl)).fetchone()
+
+    def has_stale_claim(self, owner_id, now, ttl):
+        with self.conn() as c:
+            return bool(c.execute("SELECT 1 FROM decisions WHERE status='waiting_text' AND claimed_by=?"
+                                  " AND claimed_at < ? LIMIT 1", (owner_id, int(now) - ttl)).fetchone())

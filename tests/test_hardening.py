@@ -36,7 +36,7 @@ def postback(user, data):
             "source": {"userId": user}, "postback": {"data": data}}
 
 
-class HardeningTest(unittest.TestCase):
+class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.cfg = Config(owner_claim_code="abcd1234", data_dir=Path(self.tmp.name))
@@ -49,6 +49,9 @@ class HardeningTest(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+
+class HardeningTest(Base):
 
     def test_redelivered_event_is_idempotent(self):
         """LINE 重送同一個 webhookEventId：不重複回覆、不重複推卡給老闆、不重複呼叫 Claude。"""
@@ -266,6 +269,106 @@ class HardeningTest(unittest.TestCase):
 
         r = ClaudeResponder("x", "m", client=SimpleNamespace(messages=SimpleNamespace(create=create)))
         self.assertEqual(r.answer("q", "店", "KB")[0], "好的")
+
+class MultiOwnerTest(Base):
+    """多位老闆：各自的回覆對象，互不干擾。"""
+    OWNER2 = "U" + "7" * 32
+    CUST2 = "U" + "2" * 32
+
+    def setUp(self):
+        super().setUp()
+        self.bot.handle_event(msg(self.OWNER2, "我是老闆 abcd1234"))
+        self.sender.sent.clear()
+
+    def _cards(self):
+        return [c["contents"]["footer"]["contents"] for c in self.sender.cards_to(OWNER)]
+
+    def _press(self, owner, data, ts=None):
+        e = postback(owner, data)
+        if ts:
+            e["timestamp"] = int(ts * 1000)
+        return self.bot.handle_event(e)
+
+    def _two_questions(self):
+        self.bot.handle_event(msg(CUSTOMER, "可以便宜一點嗎"))
+        self.bot.handle_event(msg(self.CUST2, "可以月結嗎"))
+        cards = self._cards()
+        return cards[0][2]["action"]["data"], cards[1][2]["action"]["data"]  # 兩張卡的「我自己回」
+
+    def test_two_owners_interleaved_each_reaches_own_customer(self):
+        d1, d2 = self._two_questions()
+        self._press(OWNER, d1)
+        self._press(self.OWNER2, d2)
+        self.sender.sent.clear()
+        self.assertEqual(self.bot.handle_event(msg(self.OWNER2, "月結沒問題")), "owner_forward")
+        self.assertEqual(self.bot.handle_event(msg(OWNER, "可以打 9 折")), "owner_forward")
+        self.assertEqual(self.sender.texts_to(self.CUST2), ["月結沒問題"])
+        self.assertEqual(self.sender.texts_to(CUSTOMER), ["可以打 9 折"])
+        self.assertEqual(self.store.open_decisions(), [])
+
+    def test_owner_without_claim_is_not_forwarded(self):
+        self._two_questions()
+        self.sender.sent.clear()
+        self.assertEqual(self.bot.handle_event(msg(self.OWNER2, "午餐吃什麼")), "owner_need_claim")
+        self.assertEqual(self.sender.texts_to(CUSTOMER), [])
+        self.assertEqual(self.sender.texts_to(self.CUST2), [])
+        self.assertIn("我來回", self.sender.sent[-1][2][0]["text"])
+        self.assertEqual(len(self.store.open_decisions()), 2)
+
+    def test_other_owners_claim_does_not_capture_my_text(self):
+        d1, _ = self._two_questions()
+        self._press(OWNER, d1)
+        self.sender.sent.clear()
+        # OWNER2 沒鎖定任何人，打字不能被轉給 OWNER 鎖定的客人
+        self.assertEqual(self.bot.handle_event(msg(self.OWNER2, "哈囉")), "owner_need_claim")
+        self.assertEqual(self.sender.texts_to(CUSTOMER), [])
+
+    def test_second_owner_cannot_steal_active_claim(self):
+        d1, _ = self._two_questions()
+        self._press(OWNER, d1)
+        self.assertEqual(self._press(self.OWNER2, d1), "claimed_by_other")
+
+    def test_claim_expires(self):
+        d1, _ = self._two_questions()
+        self._press(OWNER, d1)
+        self.now += 31 * 60
+        self.sender.sent.clear()
+        self.assertEqual(self.bot.handle_event(msg(OWNER, "晚了的回覆", ts=self.now)), "owner_claim_expired")
+        self.assertEqual(self.sender.texts_to(CUSTOMER), [])
+        # 重新按一次就恢復；過期後別的老闆也可以接手
+        self.assertEqual(self._press(self.OWNER2, d1, ts=self.now), "waiting_text")
+        self.assertEqual(self.bot.handle_event(msg(self.OWNER2, "我來回覆", ts=self.now)), "owner_forward")
+        self.assertEqual(self.sender.texts_to(CUSTOMER), ["我來回覆"])
+
+    def test_single_owner_single_card_still_just_type(self):
+        """只有一位老闆、只剩一張待決卡：不必按『我來回』，打字就回（原本體驗）。"""
+        store2 = Store(Path(self.tmp.name) / "single.db")
+        cfg = Config(owner_claim_code="abcd1234", data_dir=Path(self.tmp.name))
+        sender = FakeSender()
+        bot = Bot(cfg, store2, FAQ(ROOT / "faq.json"), sender, clock=lambda: self.now)
+        bot.handle_event(msg(OWNER, "我是老闆 abcd1234"))
+        bot.handle_event(msg(CUSTOMER, "你們有賣咖啡豆嗎"))
+        sender.sent.clear()
+        self.assertEqual(bot.handle_event(msg(OWNER, "目前沒有喔")), "owner_forward")
+        self.assertEqual(sender.texts_to(CUSTOMER), ["目前沒有喔"])
+        # 有兩張待決卡時就要先按卡片，避免回錯人
+        bot.handle_event(msg(CUSTOMER, "問題一號"))
+        bot.handle_event(msg(self.CUST2, "問題二號"))
+        self.assertEqual(bot.handle_event(msg(OWNER, "隨便打")), "owner_need_claim")
+
+    def test_old_database_is_migrated(self):
+        import sqlite3
+        path = Path(self.tmp.name) / "old.db"
+        con = sqlite3.connect(path)
+        con.executescript("CREATE TABLE decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, from_user_id TEXT, question TEXT NOT NULL,"
+                          " context TEXT, options TEXT NOT NULL, chosen TEXT, free_text TEXT,"
+                          " status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL, resolved_at TEXT);")
+        con.close()
+        st = Store(path)
+        did = st.create_decision("U1", "q", "c", [])
+        st.set_decision(did, "waiting_text", claimed_by=OWNER, claimed_at=100)
+        self.assertEqual(st.text_target(OWNER, 150, 1800)["id"], did)
+        self.assertIsNone(st.text_target(self.OWNER2, 150, 1800))
 
 
 if __name__ == "__main__":

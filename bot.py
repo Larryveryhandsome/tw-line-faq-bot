@@ -18,6 +18,7 @@ CLAIM_WORD = "我是老闆"
 CLAIM_WINDOW = 15 * 60       # 認證碼錯誤次數的計算區間
 CLAIM_GLOBAL_MAX = 30        # 全店 1 小時內認證碼錯誤超過這個數，暫停所有人綁定（分散式猜碼）
 ESCALATE_BURST = 3           # 同一位客人 1 小時內超過幾張決策卡，之後只記錄不推（省 push 額度、不洗版老闆）
+CLAIM_TTL_SEC = 30 * 60        # 按「我自己回／我來回」後，這位老闆 30 分鐘內打的字才會轉給那位客人
 AI_BREAKER_SEC = 60          # Claude 出錯後暫停呼叫幾秒（401/429/逾時時不要每則訊息都等一輪）
 PUSH_FAIL_TEXT = ("⚠️ 沒送出去（可能是本月 LINE 推播額度用完，或對方已封鎖）。這件事仍在待辦，"
                   "請直接到 LINE 官方帳號管理後台回覆對方。")
@@ -111,7 +112,20 @@ class Bot:
         if t in ("說明", "help", "指令"):
             self._send(event, user_id, text_messages(OWNER_HELP))
             return "owner_help"
-        target = self.store.text_target()
+        now = self.clock()
+        target = self.store.text_target(user_id, now, CLAIM_TTL_SEC)
+        if not target and len(self.owners()) == 1:
+            # 只有一位老闆、且只剩一張待決卡：不用再按「我自己回／我來回」，打字就回給那位客人（維持單人老闆的原本體驗）
+            rows = self.store.open_decisions()
+            if len(rows) == 1:
+                target = rows[0]
+        if not target:
+            if self.store.has_stale_claim(user_id, now, CLAIM_TTL_SEC):
+                self._send(event, user_id, text_messages("⏱ 你按「我自己回／我來回」已超過 30 分鐘，鎖定失效了。請傳「待辦」再按一次卡片上的「我自己回／我來回」。這句話沒有轉給任何客人。"))
+                return "owner_claim_expired"
+            if self.store.open_decisions():
+                self._send(event, user_id, text_messages("這句話沒有轉給任何客人。要親自回哪位客人，請先在他的卡片按「我自己回／我來回」（找不到卡片就傳「待辦」）。\n" + OWNER_HELP))
+                return "owner_need_claim"
         if target:
             if not self._ok(self.sender.push(target["from_user_id"], text_messages(t))):
                 self._send(event, user_id, text_messages(PUSH_FAIL_TEXT))
@@ -213,8 +227,13 @@ class Bot:
             self.store.log(d["from_user_id"], "out", chosen["reply"], "owner_decision", 1.0)
             self._send(event, user_id, text_messages(f"已回覆對方：\n「{chosen['reply']}」"))
             return "decided"
-        self.store.set_decision(d["id"], "waiting_text", chosen=value)
-        self._send(event, user_id, text_messages("好，你直接打字，我就照你的話回他。"))
+        now = self.clock()
+        if (d["status"] == "waiting_text" and d["claimed_by"] and d["claimed_by"] != user_id
+                and d["claimed_at"] and now - d["claimed_at"] < CLAIM_TTL_SEC and self.is_owner(d["claimed_by"])):
+            self._send(event, user_id, text_messages("這位客人已經有另一位老闆按了「我自己回／我來回」，由他處理中 👍"))
+            return "claimed_by_other"
+        self.store.set_decision(d["id"], "waiting_text", chosen=value, claimed_by=user_id, claimed_at=int(now))
+        self._send(event, user_id, text_messages("好，你直接打字，我就照你的話回他（30 分鐘內有效）。\n問題：" + d["question"][:40]))
         return "waiting_text"
 
     # ── 入口 ──────────────────────────────────────────────
