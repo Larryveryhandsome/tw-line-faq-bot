@@ -220,18 +220,21 @@ class PartsTest(unittest.TestCase):
         import contextlib
         import io
         import threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
         class H(BaseHTTPRequestHandler):
             def log_message(self, *a):
                 pass
 
             def do_POST(self):
+                body = b'{"message":"Authentication failed"}'
                 self.send_response(401)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
                 self.end_headers()
-                self.wfile.write(b'{"message":"Authentication failed"}')
+                self.wfile.write(body)
 
-        srv = HTTPServer(("127.0.0.1", 0), H)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         old = line_api.API
         line_api.API = f"http://127.0.0.1:{srv.server_port}/v2/bot"
