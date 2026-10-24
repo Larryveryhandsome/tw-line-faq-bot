@@ -7,6 +7,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import traceback
 
 from flask import Flask, abort, request
@@ -29,6 +30,26 @@ def build_bot(cfg):
         from llm import ClaudeResponder
         ai = ClaudeResponder(cfg.anthropic_api_key, cfg.ai_model)
     return Bot(cfg, Store(cfg.db_path), FAQ(cfg.faq_path), LineSender(cfg.access_token), ai=ai)
+
+
+def purge_once(cfg, store):
+    try:
+        m, d = store.purge_old(cfg.retention_days)
+        if m or d:
+            print(f"[保留期限] 已清除 {cfg.retention_days} 天前的訊息 {m} 則、已結案待辦 {d} 筆", flush=True)
+    except Exception:
+        traceback.print_exc()
+
+
+def start_purge_loop(cfg, store, interval=6 * 3600):
+    """啟動時清一次，之後每 6 小時清一次。"""
+    purge_once(cfg, store)
+
+    def loop():
+        while True:
+            time.sleep(interval)
+            purge_once(cfg, store)
+    threading.Thread(target=loop, daemon=True, name="purge").start()
 
 
 def create_app(cfg, bot):
@@ -84,7 +105,9 @@ def main():
         log = open(cfg.data_dir / "bot.log", "a", encoding="utf-8", buffering=1)
         sys.stdout = sys.stderr = log
     (cfg.data_dir / "bot.pid").write_text(str(os.getpid()), encoding="utf-8")
-    app = create_app(cfg, build_bot(cfg))
+    bot = build_bot(cfg)
+    start_purge_loop(cfg, bot.store)
+    app = create_app(cfg, bot)
     print(f"LINE 客服 bot 啟動：http://{cfg.host}:{cfg.port}/callback（AI 補答：{'開' if cfg.ai_enabled else '關'}）")
     app.run(host=cfg.host, port=cfg.port)
 

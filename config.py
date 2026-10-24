@@ -41,6 +41,7 @@ class Config:
     # 選用：Claude 補答（沒設 key 就完全不呼叫 AI）
     ai_per_user_hour: int = 6        # 每位客人每小時最多讓 Claude 補答幾次（防洗版燒錢）
     ai_daily_cap: int = 300          # 全店每 24 小時最多呼叫 Claude 幾次
+    retention_days: int = 30         # 客人訊息／已處理待辦保留天數；0＝永久保存
     claim_max_fails: int = 5         # 老闆認證碼同一人 15 分鐘內最多錯幾次
     anthropic_api_key: str = ""
     ai_model: str = "claude-sonnet-5-5"
@@ -79,6 +80,7 @@ def from_env() -> Config:
         port=int(_env("BOT_PORT", "18800")),
         threshold=float(_env("BOT_CONFIDENCE_THRESHOLD", "0.55")),
         reply_ttl_sec=int(_env("BOT_REPLY_TTL_SEC", "50")),
+        retention_days=max(0, int(_env("BOT_RETENTION_DAYS", "30"))),
         ai_per_user_hour=int(_env("BOT_AI_PER_USER_HOUR", "6")),
         ai_daily_cap=int(_env("BOT_AI_DAILY_CAP", "300")),
         anthropic_api_key=_env("ANTHROPIC_API_KEY"),

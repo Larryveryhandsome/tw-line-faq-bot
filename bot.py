@@ -25,6 +25,8 @@ PUSH_FAIL_TEXT = ("⚠️ 沒送出去（可能是本月 LINE 推播額度用完
 OWNER_HELP = ("你可以用的指令：\n"
               "・待辦 — 把還沒決定的事再推一次\n"
               "・重載 — faq.json 改過後重新載入\n"
+              "・老闆名單 — 看目前有哪些老闆\n"
+              "・移除老闆 <編號> — 把某位老闆降回一般客人（至少要留一位）\n"
               "・直接打字 — 照你的話回給最近在等的客人")
 
 
@@ -89,6 +91,34 @@ class Bot:
         self._send(event, user_id, text_messages("認證碼不對。請輸入「我是老闆 <認證碼>」，認證碼在 .env 的 BOT_OWNER_CLAIM_CODE。"))
         return True
 
+    def _owner_label(self, uid):
+        c = self.store.get_contact(uid)
+        name = (c["display_name"] if c and c["display_name"] else "（未取得名稱）")
+        return f"{name}（…{uid[-4:]}）"
+
+    def _owner_list_text(self, me):
+        lines = ["目前的老闆："]
+        for i, uid in enumerate(self.owners(), 1):
+            tag = "（你）" if uid == me else ""
+            fixed = "【.env 固定，無法用指令移除】" if uid == self.cfg.owner_user_id else ""
+            lines.append(f"{i}. {self._owner_label(uid)}{tag}{fixed}")
+        lines.append("\n移除請傳「移除老闆 <編號>」。")
+        return "\n".join(lines)
+
+    def _remove_owner(self, me, arg):
+        """只有老闆能下這個指令（_handle_owner 已擋）。至少留一位；.env 固定的老闆不能用指令移除。"""
+        owners = self.owners()
+        if not arg.isdigit() or not (1 <= int(arg) <= len(owners)):
+            return "請傳「移除老闆 <編號>」，編號看「老闆名單」。"
+        target = owners[int(arg) - 1]
+        if len(owners) <= 1:
+            return "這是最後一位老闆，不能移除（否則沒有人收得到客人的問題）。"
+        if target == self.cfg.owner_user_id:
+            return "這位老闆是寫在 .env（BOT_OWNER_USER_ID）的，要改 .env 再重啟才能移除。"
+        self.store.set_role(target, "customer")
+        who = "你自己" if target == me else self._owner_label(target)
+        return f"已移除老闆：{who}。對方之後會被當一般客人；要再加回來，需重新傳「我是老闆 <認證碼>」。若認證碼可能外洩，請順便換掉 .env 的 BOT_OWNER_CLAIM_CODE。"
+
     def _handle_owner(self, event, user_id, text):
         t = text.strip()
         if t in ("待辦", "待決", "決策"):
@@ -109,6 +139,12 @@ class Bot:
                 return "owner_reload_failed"
             self._send(event, user_id, text_messages("客服話術已重新載入 ✅"))
             return "owner_reload"
+        if t in ("老闆名單", "老闆列表", "owners"):
+            self._send(event, user_id, text_messages(self._owner_list_text(user_id)))
+            return "owner_list"
+        if t.startswith("移除老闆"):
+            self._send(event, user_id, text_messages(self._remove_owner(user_id, t[len("移除老闆"):].strip())))
+            return "owner_remove"
         if t in ("說明", "help", "指令"):
             self._send(event, user_id, text_messages(OWNER_HELP))
             return "owner_help"

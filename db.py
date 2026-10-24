@@ -185,3 +185,18 @@ class Store:
         with self.conn() as c:
             return bool(c.execute("SELECT 1 FROM decisions WHERE status='waiting_text' AND claimed_by=?"
                                   " AND claimed_at < ? LIMIT 1", (owner_id, int(now) - ttl)).fetchone())
+
+    def purge_old(self, days, now=None):
+        """刪掉超過保留天數的客人訊息、已結案的待辦（含客人原話），以及過期的技術紀錄。
+        未結案的待辦不刪；days<=0 代表永久保存（技術紀錄仍會清）。回傳 (訊息數, 待辦數)。"""
+        now = now or time.time()
+        with self.conn() as c:
+            c.execute("DELETE FROM processed_events WHERE ts < ?", (int(now) - 7 * 86400,))
+            c.execute("DELETE FROM claim_fails WHERE ts < ?", (int(now) - 86400,))
+            c.execute("DELETE FROM ai_calls WHERE ts < ?", (int(now) - 2 * 86400,))
+            if days <= 0:
+                return 0, 0
+            cut = datetime.fromtimestamp(now - days * 86400).isoformat(timespec="seconds")
+            m = c.execute("DELETE FROM messages WHERE created_at < ?", (cut,)).rowcount
+            d = c.execute("DELETE FROM decisions WHERE status='resolved' AND created_at < ?", (cut,)).rowcount
+            return m, d
