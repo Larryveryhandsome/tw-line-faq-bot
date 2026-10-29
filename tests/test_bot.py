@@ -82,9 +82,9 @@ class BotTest(unittest.TestCase):
             self.bot.handle_event(msg(CUSTOMER, q))
         everything_to_customer = json.dumps([ms for kind, to, ms in self.sender.sent if to in (CUSTOMER, "tok-" + CUSTOMER)],
                                             ensure_ascii=False)
-        self.assertNotIn("812ibtir", everything_to_customer)
+        self.assertNotIn("0928-880-392", everything_to_customer)
         self.assertEqual(self.bot.handle_event(msg(OWNER, "說明")), "owner_help")
-        self.assertTrue(any("@812ibtir" in x and "留白事務所・林其衞" in x for x in self.sender.texts_to(OWNER)))
+        self.assertTrue(any("林其衞" in x and "0928-880-392" in x for x in self.sender.texts_to(OWNER)))
 
     def test_faq_answer_by_reply(self):
         self.assertEqual(self.bot.handle_event(msg(CUSTOMER, "請問營業時間？")), "faq")

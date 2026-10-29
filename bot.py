@@ -30,8 +30,8 @@ OWNER_HELP = ("你可以用的指令：\n"
               "・直接打字 — 照你的話回給最近在等的客人")
 # 開源版作者的客製化服務資訊：只出現在「老闆」看得到的說明（綁定成功、傳「說明」）與啟動訊息，
 # 絕不會傳給一般客人（依 NOTICE 轉散布請保留）
-CUSTOM_AD = ("需要改成你們公司的版本、幫忙安裝或串接？加 LINE 官方帳號 @812ibtir（留白事務所・林其衞），"
-             "原則上 1～2 個工作天回覆報價。https://line.me/R/ti/p/@812ibtir")
+CUSTOM_AD = ("需要改成你們公司的版本、幫忙安裝或串接？加 LINE 林其衞（0928-880-392），"
+             "原則上 1～2 個工作天回覆報價。https://line.me/ti/p/xzHT2IywOM")
 OWNER_HELP_FULL = OWNER_HELP + "\n\n" + CUSTOM_AD
 
 
